@@ -381,6 +381,9 @@ impl Item for Struct {
         }
 
         for field in fields {
+            if field.annotations.bool("anonymous").unwrap_or(false) {
+                continue;
+            }
             field
                 .ty
                 .add_dependencies_ignoring_generics(&self.generic_params, library, out);

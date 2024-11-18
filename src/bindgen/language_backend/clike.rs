@@ -1,3 +1,4 @@
+use crate::bindgen::declarationtyperesolver::DeclarationType;
 use crate::bindgen::ir::{
     to_known_assoc_constant, ConditionWrite, DeprecatedNoteKind, Documentation, Enum, EnumVariant,
     Field, GenericParams, Item, Literal, OpaqueItem, ReprAlign, Static, Struct, ToCondition, Type,
@@ -47,7 +48,26 @@ impl<'a> CLikeLanguageBackend<'a> {
         condition.write_before(self.config, out);
 
         self.write_documentation(out, &f.documentation);
-        cdecl::write_field(self, out, &f.ty, &f.name, self.config);
+        // For anonymous unions and structs: https://gcc.gnu.org/onlinedocs/gcc/Unnamed-Fields.html
+        if f.annotations.bool("anonymous").unwrap_or(false) {
+            if let Type::Path(ref p) = f.ty {
+                match p.ctype().expect("anonymous field must be struct or union") {
+                    DeclarationType::Struct => {
+                        unimplemented!("Anonymous struct fields are not yet supported");
+                    },
+                    DeclarationType::Union => {
+                        self.write_union_inner(out, &out.bindings().get_union(p.path()), true);
+                    },
+                    DeclarationType::Enum => {
+                        panic!("Anonymous field cannot be an enum");
+                    }
+                }
+            } else {
+                panic!("Anonymous field must be a path");
+            }
+        } else {
+            cdecl::write_field(self, out, &f.ty, &f.name, self.config);
+        }
 
         if let Some(bitfield) = f.annotations.atom("bitfield") {
             write!(out, ": {}", bitfield.unwrap_or_default());
@@ -60,6 +80,74 @@ impl<'a> CLikeLanguageBackend<'a> {
         if condition.is_some() {
             out.new_line();
         }
+    }
+
+    fn write_union_inner<W: Write>(&mut self, out: &mut SourceWriter<W>, u: &Union, anonymous: bool) {
+        let condition = u.cfg.to_condition(self.config);
+        condition.write_before(self.config, out);
+
+        self.write_documentation(out, &u.documentation);
+
+        self.write_generic_param(out, &u.generic_params);
+
+        // The following results in
+        // C++ or C with Tag as style:
+        //   union Name {
+        // C with Type only style:
+        //   typedef union {
+        // C with Both as style:
+        //   typedef union Name {
+        if self.generate_typedef() && !anonymous {
+            out.write("typedef ");
+        }
+
+        out.write("union");
+
+        if let Some(align) = u.alignment {
+            match align {
+                ReprAlign::Packed => {
+                    if let Some(ref anno) = self.config.layout.packed {
+                        write!(out, " {}", anno);
+                    }
+                }
+                ReprAlign::Align(n) => {
+                    if let Some(ref anno) = self.config.layout.aligned_n {
+                        write!(out, " {}({})", anno, n);
+                    }
+                }
+            }
+        }
+
+        if !anonymous && (self.config.language != Language::C || self.config.style.generate_tag()) {
+            write!(out, " {}", u.export_name);
+        }
+
+        out.open_brace();
+
+        // Emit the pre_body section, if relevant
+        if let Some(body) = self.config.export.pre_body(&u.path) {
+            out.write_raw_block(body);
+            out.new_line();
+        }
+
+        out.write_vertical_source_list(self, &u.fields, ListType::Cap(";"), Self::write_field);
+
+        // Emit the post_body section, if relevant
+        if let Some(body) = self.config.export.post_body(&u.path) {
+            out.new_line();
+            out.write_raw_block(body);
+        }
+
+        if anonymous {
+            out.close_brace(false);
+        } else if self.generate_typedef() {
+            out.close_brace(false);
+            write!(out, " {};", u.export_name);
+        } else {
+            out.close_brace(true);
+        }
+
+        condition.write_after(self.config, out);
     }
 
     fn write_generic_param<W: Write>(&mut self, out: &mut SourceWriter<W>, g: &GenericParams) {
@@ -639,70 +727,9 @@ impl LanguageBackend for CLikeLanguageBackend<'_> {
         condition.write_after(self.config, out);
     }
 
+
     fn write_union<W: Write>(&mut self, out: &mut SourceWriter<W>, u: &Union) {
-        let condition = u.cfg.to_condition(self.config);
-        condition.write_before(self.config, out);
-
-        self.write_documentation(out, &u.documentation);
-
-        self.write_generic_param(out, &u.generic_params);
-
-        // The following results in
-        // C++ or C with Tag as style:
-        //   union Name {
-        // C with Type only style:
-        //   typedef union {
-        // C with Both as style:
-        //   typedef union Name {
-        if self.generate_typedef() {
-            out.write("typedef ");
-        }
-
-        out.write("union");
-
-        if let Some(align) = u.alignment {
-            match align {
-                ReprAlign::Packed => {
-                    if let Some(ref anno) = self.config.layout.packed {
-                        write!(out, " {}", anno);
-                    }
-                }
-                ReprAlign::Align(n) => {
-                    if let Some(ref anno) = self.config.layout.aligned_n {
-                        write!(out, " {}({})", anno, n);
-                    }
-                }
-            }
-        }
-
-        if self.config.language != Language::C || self.config.style.generate_tag() {
-            write!(out, " {}", u.export_name);
-        }
-
-        out.open_brace();
-
-        // Emit the pre_body section, if relevant
-        if let Some(body) = self.config.export.pre_body(&u.path) {
-            out.write_raw_block(body);
-            out.new_line();
-        }
-
-        out.write_vertical_source_list(self, &u.fields, ListType::Cap(";"), Self::write_field);
-
-        // Emit the post_body section, if relevant
-        if let Some(body) = self.config.export.post_body(&u.path) {
-            out.new_line();
-            out.write_raw_block(body);
-        }
-
-        if self.generate_typedef() {
-            out.close_brace(false);
-            write!(out, " {};", u.export_name);
-        } else {
-            out.close_brace(true);
-        }
-
-        condition.write_after(self.config, out);
+        self.write_union_inner(out, u, false);
     }
 
     fn write_opaque_item<W: Write>(&mut self, out: &mut SourceWriter<W>, o: &OpaqueItem) {

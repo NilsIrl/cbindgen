@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use crate::bindgen::config::{Config, Language};
 use crate::bindgen::ir::{
-    Constant, Function, ItemContainer, ItemMap, Path as BindgenPath, Static, Struct, Type, Typedef,
+    Constant, Function, ItemContainer, ItemMap, Path as BindgenPath, Static, Struct, Union, Type, Typedef,
 };
 use crate::bindgen::language_backend::{
     CLikeLanguageBackend, CythonLanguageBackend, LanguageBackend,
@@ -23,9 +23,13 @@ use crate::bindgen::writer::SourceWriter;
 /// A bindings header that can be written.
 pub struct Bindings {
     pub config: Config,
-    /// The map from path to struct, used to lookup whether a given type is a
-    /// transparent struct. This is needed to generate code for constants.
+    /// The map from path to struct:
+    /// 1. used to lookup whether a given type is a transparent struct. This is
+    /// needed to generate code for constants.
+    /// 2. Anonymous structs
     struct_map: ItemMap<Struct>,
+    /// The map from path to union used for anonymous unions.
+    union_map: ItemMap<Union>,
     typedef_map: ItemMap<Typedef>,
     struct_fileds_memo: RefCell<HashMap<BindgenPath, Rc<Vec<String>>>>,
     pub globals: Vec<Static>,
@@ -44,6 +48,7 @@ impl Bindings {
     pub(crate) fn new(
         config: Config,
         struct_map: ItemMap<Struct>,
+        union_map: ItemMap<Union>,
         typedef_map: ItemMap<Typedef>,
         constants: Vec<Constant>,
         globals: Vec<Static>,
@@ -56,6 +61,7 @@ impl Bindings {
         Bindings {
             config,
             struct_map,
+            union_map,
             typedef_map,
             struct_fileds_memo: Default::default(),
             globals,
@@ -94,7 +100,7 @@ impl Bindings {
     }
 
     pub fn struct_exists(&self, path: &BindgenPath) -> bool {
-        let mut any = false;
+        let mut any: bool = false;
         self.struct_map
             .for_items(&self.resolved_struct_path(path), |_| any = true);
         any
@@ -168,6 +174,19 @@ impl Bindings {
         writeln!(&mut depfile).unwrap();
 
         depfile.flush().unwrap();
+    }
+
+    pub(crate) fn get_union(&self, path: &BindgenPath) -> Union {
+        let mut called_already = false;
+        let mut u_ret = None;
+        self.union_map.for_items(&path, |u| {
+            if called_already {
+                unimplemented!("how is it possible get multiple items for the same path?");
+            }
+            called_already = true;
+            u_ret = Some(u.clone());
+        });
+        return u_ret.unwrap();
     }
 
     pub fn write_to_file<P: AsRef<path::Path>>(&self, path: P) -> bool {
